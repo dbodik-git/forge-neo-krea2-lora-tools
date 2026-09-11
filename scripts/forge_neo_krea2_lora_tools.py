@@ -1,4 +1,5 @@
 import os
+import re
 import gradio as gr
 
 from modules import paths, shared, script_callbacks
@@ -11,6 +12,7 @@ from forge_neo_lora_core import (
 )
 
 _LORA_CHOICES = {}
+_PROGRESS_RE = re.compile(r"(?:SVD|Strip) progress:\s*(\d+)\s*/\s*(\d+)", re.I)
 
 _PROFILE_SUFFIXES = {
     "Max (txtfusion only)": "_Max",
@@ -110,32 +112,51 @@ def _inspect_svd(name):
         return f'ERROR: {e}'
 
 
-def _strip(name, threshold, dry, profile):
+def _progress_from_log(progress, msg):
+    text = str(msg)
+    match = _PROGRESS_RE.search(text)
+    if match and progress is not None:
+        current = int(match.group(1))
+        total = max(1, int(match.group(2)))
+        progress(min(1.0, current / total), desc=f"{current}/{total}")
+
+
+def _strip(name, threshold, dry, profile, progress=gr.Progress(track_tqdm=False)):
     if not name:
         return 'No LoRA selected. Click Refresh.'
     logs = []
     def log(msg):
         logs.append(str(msg))
+        _progress_from_log(progress, msg)
     suffix = _PROFILE_SUFFIXES.get(profile, '_Processed')
     try:
+        if progress is not None:
+            progress(0.0, desc='Preparing stripper...')
         status, _ = strip_krea2_lora(
             _resolve(name), suffix, float(threshold), bool(dry), profile, log=log
         )
+        if progress is not None:
+            progress(1.0, desc='Strip complete')
         return '\n'.join(logs + [status])
     except Exception as e:
         return '\n'.join(logs + [f'ERROR: {e}'])
 
 
-def _svd(name, rank, alpha_mode, dry, device):
+def _svd(name, rank, alpha_mode, dry, device, progress=gr.Progress(track_tqdm=False)):
     if not name:
         return 'No LoRA selected. Click Refresh.'
     logs = []
     def log(msg):
         logs.append(str(msg))
+        _progress_from_log(progress, msg)
     try:
+        if progress is not None:
+            progress(0.0, desc='Preparing SVD...')
         status, _ = svd_resize_krea2_lora(
-            _resolve(name), int(rank), alpha_mode, bool(dry), log=log, device=device
+            _resolve(name), int(rank), alpha_mode, bool(dry), log=log, device=str(device or 'auto').lower()
         )
+        if progress is not None:
+            progress(1.0, desc='SVD complete')
         return '\n'.join(logs + [status])
     except Exception as e:
         return '\n'.join(logs + [f'ERROR: {e}'])
@@ -146,11 +167,11 @@ def _lora_tab_ui():
     choices = list(_LORA_CHOICES)
 
     with gr.Blocks() as ui:
-        gr.Markdown('## Krea2 LoRA Tools')
+        gr.Markdown('## 🐈‍⬛ Krea2 LoRA Tools')
         gr.Markdown(
-            'Analyze, structurally strip, or SVD-resize Krea2 LoRAs. ' 
-            'SVD keeps the strongest low-rank components and writes a new file; the source is never modified. ' \
-            'Supports both diffusion_model.* and transformer.* Krea2 key layouts.'
+            'Analyze, structurally strip, or SVD-resize Krea2 LoRAs. '
+            'SVD keeps the strongest low-rank components and writes a new file; the source is never modified. '
+            'Supports both `diffusion_model.*` and `transformer.*` Krea2 key layouts.'
         )
 
         with gr.Row():
@@ -158,8 +179,9 @@ def _lora_tab_ui():
                 label='Krea2 LoRA', choices=choices,
                 value=choices[0] if choices else None, scale=8,
             )
-            refresh_loras = gr.Button('Refresh', scale=1)
+            refresh_loras = gr.Button('🔄 Refresh', scale=1)
 
+        gr.Markdown('### 🔬 SVD Resizer')
         with gr.Row():
             svd_device = gr.Dropdown(
                 label='Compute device',
@@ -186,7 +208,8 @@ def _lora_tab_ui():
 
         svd_output = gr.Textbox(label='SVD log / result', value='Ready.', lines=16, interactive=False)
 
-        gr.Markdown('### Legacy structural stripper')
+        gr.Markdown('### 🧰 Legacy structural stripper')
+        gr.Markdown('Structural profiles are kept as a separate legacy method. For fidelity-preserving size reduction, prefer SVD.')
         with gr.Row():
             lora_profile = gr.Dropdown(
                 label='Profile', choices=list(KREA2_LORA_PROFILES.keys()),
