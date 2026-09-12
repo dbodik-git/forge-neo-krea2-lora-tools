@@ -10,9 +10,10 @@ from forge_neo_lora_core import (
     inspect_svd_krea2_lora,
     KREA2_LORA_PROFILES,
 )
+from svd_rank_advisor import analyze_svd_rank_profile
 
 _LORA_CHOICES = {}
-_PROGRESS_RE = re.compile(r"(?:SVD|Strip) progress:\s*(\d+)\s*/\s*(\d+)", re.I)
+_PROGRESS_RE = re.compile(r"(?:SVD(?:\s+analysis)?|Strip) progress:\s*(\d+)\s*/\s*(\d+)", re.I)
 
 _PROFILE_SUFFIXES = {
     "Max (txtfusion only)": "_Max",
@@ -96,20 +97,76 @@ def _analyze(name):
         return f'ERROR: {e}'
 
 
-def _inspect_svd(name):
+def _format_rank_profile(info):
+    energy = info["energy_pct_by_rank"]
+    lines = [
+        "Krea2 SVD READY",
+        "=" * 72,
+        f"Pairs: {info['pairs']}",
+        f"Source rank: {info['source_rank']}",
+        f"Layout: {info['layout']}",
+        f"Compute device: {info['device']}",
+        "",
+        "Recommended ranks:",
+    ]
+    for label, rank in (
+        ("Aggressive (≥95% energy)", info["recommendations"]["Aggressive"]),
+        ("Balanced   (≥98% energy)", info["recommendations"]["Balanced"]),
+        ("Conservative (≥99% energy)", info["recommendations"]["Conservative"]),
+    ):
+        size = info["estimated_sizes"].get(rank, info["original_size"])
+        lines.append(
+            f"  {label}: r{rank} — {energy[rank]:.2f}% energy — ~{size / (1024 * 1024):.2f} MiB"
+        )
+
+    balanced = info["recommendations"]["Balanced"]
+    lines.extend([
+        "",
+        f"★ Recommended SVD rank: r{balanced}",
+        "  Target: ≥98% global SVD energy retained.",
+        f"  The SVD slider has been set to r{balanced}.",
+        "",
+        "Rank profile:",
+    ])
+
+    for rank in info["ranks"]:
+        marker = "  ★" if rank == balanced else "   "
+        size = info["estimated_sizes"][rank]
+        reduction = 100.0 * (1.0 - size / info["original_size"]) if info["original_size"] else 0.0
+        lines.append(
+            f"{marker} r{rank:<2}  {energy[rank]:6.2f}% energy   ~{size / (1024 * 1024):7.2f} MiB   ({reduction:5.1f}% smaller)"
+        )
+
+    lines.extend([
+        "",
+        "Note: energy is a global SVD metric; visual A/B testing still wins.",
+        "Aggressive = smaller file, Balanced = default sweet spot, Conservative = safer fidelity.",
+    ])
+    return "\n".join(lines)
+
+
+def _inspect_svd(name, device, progress=gr.Progress(track_tqdm=False)):
     if not name:
-        return 'No LoRA selected. Click Refresh.'
+        return 'No LoRA selected. Click Refresh.', gr.update()
+    logs = []
+
+    def log(msg):
+        logs.append(str(msg))
+        _progress_from_log(progress, msg)
+
     try:
-        info = inspect_svd_krea2_lora(_resolve(name))
-        return (f"Krea2 SVD READY\n"
-                f"Pairs: {len(info['pairs'])}\n"
-                f"Source rank: {info['rank']}\n"
-                f"Dtypes: {info['dtypes']}\n"
-                f"Layout: {info['layout']}\n"
-                f"Architecture: {info['metadata'].get('modelspec.architecture', info['layout'])}\n"
-                f"Alpha: {info['alpha']}")
+        if progress is not None:
+            progress(0.0, desc='Analyzing SVD ranks...')
+        info = analyze_svd_rank_profile(
+            _resolve(name),
+            device=str(device or 'auto').lower(),
+            log=log,
+        )
+        if progress is not None:
+            progress(1.0, desc='Rank analysis complete')
+        return _format_rank_profile(info), info["recommendations"]["Balanced"]
     except Exception as e:
-        return f'ERROR: {e}'
+        return "\n".join(logs + [f'ERROR: {e}']), gr.update()
 
 
 def _progress_from_log(progress, msg):
@@ -125,9 +182,11 @@ def _strip(name, threshold, dry, profile, progress=gr.Progress(track_tqdm=False)
     if not name:
         return 'No LoRA selected. Click Refresh.'
     logs = []
+
     def log(msg):
         logs.append(str(msg))
         _progress_from_log(progress, msg)
+
     suffix = _PROFILE_SUFFIXES.get(profile, '_Processed')
     try:
         if progress is not None:
@@ -146,14 +205,17 @@ def _svd(name, rank, alpha_mode, dry, device, progress=gr.Progress(track_tqdm=Fa
     if not name:
         return 'No LoRA selected. Click Refresh.'
     logs = []
+
     def log(msg):
         logs.append(str(msg))
         _progress_from_log(progress, msg)
+
     try:
         if progress is not None:
             progress(0.0, desc='Preparing SVD...')
         status, _ = svd_resize_krea2_lora(
-            _resolve(name), int(rank), alpha_mode, bool(dry), log=log, device=str(device or 'auto').lower()
+            _resolve(name), int(rank), alpha_mode, bool(dry), log=log,
+            device=str(device or 'auto').lower()
         )
         if progress is not None:
             progress(1.0, desc='SVD complete')
@@ -203,10 +265,10 @@ def _lora_tab_ui():
             svd_dry = gr.Checkbox(label='SVD dry run', value=False, scale=1)
 
         with gr.Row():
-            svd_inspect_button = gr.Button('Check SVD compatibility')
+            svd_inspect_button = gr.Button('🔎 Analyze & recommend rank')
             svd_button = gr.Button('🔬 SVD Resize LoRA')
 
-        svd_output = gr.Textbox(label='SVD log / result', value='Ready.', lines=16, interactive=False)
+        svd_output = gr.Textbox(label='SVD analysis / log / result', value='Ready.', lines=20, interactive=False)
 
         gr.Markdown('### 🧰 Legacy structural stripper')
         gr.Markdown('Structural profiles are kept as a separate legacy method. For fidelity-preserving size reduction, prefer SVD.')
@@ -226,8 +288,16 @@ def _lora_tab_ui():
         lora_log_output = gr.Textbox(label='Stripper log / result', value='Ready.', lines=16, interactive=False)
 
         refresh_loras.click(fn=_refresh, outputs=[lora_name])
-        svd_inspect_button.click(fn=_inspect_svd, inputs=[lora_name], outputs=[svd_output])
-        svd_button.click(fn=_svd, inputs=[lora_name, svd_rank, svd_alpha, svd_dry, svd_device], outputs=[svd_output])
+        svd_inspect_button.click(
+            fn=_inspect_svd,
+            inputs=[lora_name, svd_device],
+            outputs=[svd_output, svd_rank],
+        )
+        svd_button.click(
+            fn=_svd,
+            inputs=[lora_name, svd_rank, svd_alpha, svd_dry, svd_device],
+            outputs=[svd_output],
+        )
         lora_analyze_button.click(fn=_analyze, inputs=[lora_name], outputs=[lora_log_output])
         lora_strip_button.click(
             fn=_strip,
