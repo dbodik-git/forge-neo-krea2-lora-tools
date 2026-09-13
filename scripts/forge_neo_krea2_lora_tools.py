@@ -21,6 +21,19 @@ _PROFILE_SUFFIXES = {
     "Light (aux only)": "_Light",
 }
 
+_GENERATION_ACTIVE_MESSAGE = (
+    "Generation is currently in progress. Stop/wait for the current generation to finish "
+    "before running Krea2 LoRA processing."
+)
+
+
+def _generation_active():
+    """Return True while Forge Neo has an active generation job."""
+    state = getattr(shared, "state", None)
+    if state is None:
+        return False
+    return bool(getattr(state, "job", ""))
+
 
 def _as_dir_list(value):
     if not value:
@@ -147,6 +160,8 @@ def _format_rank_profile(info):
 def _inspect_svd(name, device, progress=gr.Progress(track_tqdm=False)):
     if not name:
         return 'No LoRA selected. Click Refresh.', gr.update()
+    if _generation_active():
+        return _GENERATION_ACTIVE_MESSAGE, gr.update()
     logs = []
 
     def log(msg):
@@ -180,6 +195,8 @@ def _progress_from_log(progress, msg):
 def _strip(name, threshold, dry, profile, progress=gr.Progress(track_tqdm=False)):
     if not name:
         return 'No LoRA selected. Click Refresh.'
+    if _generation_active():
+        return _GENERATION_ACTIVE_MESSAGE
     logs = []
 
     def log(msg):
@@ -203,6 +220,8 @@ def _strip(name, threshold, dry, profile, progress=gr.Progress(track_tqdm=False)
 def _svd(name, rank, alpha_mode, dry, device, progress=gr.Progress(track_tqdm=False)):
     if not name:
         return 'No LoRA selected. Click Refresh.'
+    if _generation_active():
+        return _GENERATION_ACTIVE_MESSAGE
     logs = []
 
     def log(msg):
