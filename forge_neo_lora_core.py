@@ -38,6 +38,47 @@ def _mb(v):
     return v / (1024 * 1024)
 
 
+# Byte size per element for the dtype spellings we might see back from
+# safetensors' get_slice().get_dtype() -- covers both the safetensors-native
+# short names (F32, BF16, ...) and torch-style names (float32, bfloat16, ...)
+# in case that differs across safetensors/torch versions.
+_DTYPE_BYTE_SIZES = {
+    "F64": 8, "F32": 4, "F16": 2, "BF16": 2,
+    "I64": 8, "I32": 4, "I16": 2, "I8": 1, "U8": 1, "BOOL": 1,
+    "FLOAT64": 8, "FLOAT32": 4, "FLOAT16": 2, "BFLOAT16": 2,
+    "INT64": 8, "INT32": 4, "INT16": 2, "INT8": 1, "UINT8": 1,
+}
+
+
+def _slice_dtype_and_itemsize(tensor_slice):
+    """Return (dtype_name, bytes_per_element) for a safe_open().get_slice()
+    object using only header metadata -- no tensor payload is read from disk.
+
+    This is what makes byte-size / dtype reporting on a multi-GB LoRA fast:
+    get_tensor(key) has to read and materialize that tensor's full data,
+    while get_slice(key) only reads the (shape, dtype) recorded in the
+    safetensors header. Falls back to loading the tensor just this once if a
+    safetensors version ever reports a dtype spelling outside the table
+    above, so this can never silently mis-size a tensor.
+    """
+    dtype_name = str(tensor_slice.get_dtype()).replace("torch.", "")
+    itemsize = _DTYPE_BYTE_SIZES.get(dtype_name.upper())
+    if itemsize is not None:
+        return dtype_name, itemsize
+    tensor = tensor_slice[:]
+    return str(tensor.dtype).replace("torch.", ""), tensor.element_size()
+
+
+def _slice_nbytes_and_dtype(tensor_slice):
+    """Total byte size and dtype name of a get_slice() object, from shape
+    metadata alone (see _slice_dtype_and_itemsize)."""
+    dtype_name, itemsize = _slice_dtype_and_itemsize(tensor_slice)
+    numel = 1
+    for dim in tensor_slice.get_shape():
+        numel *= int(dim)
+    return numel * itemsize, dtype_name
+
+
 def _sample_block_keep_set(total_blocks, fraction):
     if total_blocks <= 0:
         return set()
@@ -116,15 +157,17 @@ def inspect_krea2_lora(path, profile="Max (txtfusion only)", log=_noop_logger):
         total_bytes = strip_bytes = keep_count = strip_count = 0
         with safetensors.safe_open(path, framework="pt", device="cpu") as f:
             for key in f.keys():
-                tensor = f.get_tensor(key)
-                nbytes = tensor.element_size() * tensor.nelement()
+                # Only byte-size accounting is needed here, so read shape/
+                # dtype from the header (see _slice_nbytes_and_dtype) instead
+                # of loading each tensor's actual payload -- on a large LoRA
+                # this turns a full-file read into an instant metadata scan.
+                nbytes, _ = _slice_nbytes_and_dtype(f.get_slice(key))
                 total_bytes += nbytes
                 if should_strip(key):
                     strip_count += 1
                     strip_bytes += nbytes
                 else:
                     keep_count += 1
-                del tensor
         gc.collect()
         return {
             "metadata": metadata, "is_krea2": is_krea2, "profile": profile_name,
@@ -150,17 +193,19 @@ def analyze_krea2_lora(model_path, log=_noop_logger):
         total_tensor_bytes = 0
         dtype_counts = Counter()
         for key in keys:
-            tensor = f.get_tensor(key)
-            tensor_bytes = tensor.element_size() * tensor.nelement()
+            # This loop used to call f.get_tensor(key) for every tensor in
+            # the file just to compute byte sizes -- i.e. a full read of the
+            # entire LoRA's data on every "Analyze" click. Shape/dtype from
+            # the header is all this needs.
+            tensor_bytes, dtype_name = _slice_nbytes_and_dtype(f.get_slice(key))
             total_tensor_bytes += tensor_bytes
-            dtype_counts[str(tensor.dtype).replace("torch.", "")] += 1
+            dtype_counts[dtype_name] += 1
             parts = key.split('.')
             group = '.'.join(parts[:3]) if len(parts) >= 3 else ('.'.join(parts[:2]) if len(parts) >= 2 else parts[0])
             stat = group_stats.setdefault(group, {"count": 0, "bytes": 0})
             stat["count"] += 1
             stat["bytes"] += tensor_bytes
-            key_rows.append((key, tensor_bytes, str(tensor.dtype).replace("torch.", "")))
-            del tensor
+            key_rows.append((key, tensor_bytes, dtype_name))
     gc.collect()
 
     lines = [
@@ -211,15 +256,17 @@ def strip_krea2_lora(model_path, output_suffix=LORA_OUTPUT_SUFFIX, risk_threshol
         total_bytes = strip_bytes = 0
         strip_count = keep_count = 0
         for key in f.keys():
-            tensor = f.get_tensor(key)
-            nbytes = tensor.element_size() * tensor.nelement()
+            # Stats-only pre-pass (used for the risk-ratio check and the
+            # dry-run report) -- shape/dtype metadata is enough, no need to
+            # load every tensor's actual data a second time before the real
+            # write loop further down even attempts anything.
+            nbytes, _ = _slice_nbytes_and_dtype(f.get_slice(key))
             total_bytes += nbytes
             if should_strip(key):
                 strip_count += 1
                 strip_bytes += nbytes
             else:
                 keep_count += 1
-            del tensor
     info = {
         "is_krea2": any(k.startswith(KREA2_LORA_SIGNATURE) for k in keys),
         "total_count": len(keys), "keep_count": keep_count, "strip_count": strip_count,
@@ -352,20 +399,28 @@ def inspect_svd_krea2_lora(model_path):
 
     ranks = []
     dtypes = Counter()
-    # One safe_open handle is enough; reopening once per pair was needlessly
-    # expensive on large LoRAs.
+    # This function runs before every SVD-related action (Analyze &
+    # recommend rank, SVD dry-run, SVD resize), so it's the single hottest
+    # path in the plugin. It only ever needs each pair's SHAPE (for the rank/
+    # consistency check) and dtype NAME (informational only, unused
+    # elsewhere) -- get_slice() reads both from the safetensors header
+    # without loading the tensor payload, unlike get_tensor(). Previously
+    # this loaded every A/B pair's full data just to inspect .shape, which
+    # is a full read of the entire LoRA's tensor bytes before any real work
+    # (or even the rank-recommendation report) could start.
     with safetensors.safe_open(model_path, framework="pt", device="cpu") as f:
         for a_key, b_key in pairs:
-            a = f.get_tensor(a_key)
-            b = f.get_tensor(b_key)
-            if a.ndim != 2 or b.ndim != 2 or a.shape[0] != b.shape[1]:
+            a_slice = f.get_slice(a_key)
+            b_slice = f.get_slice(b_key)
+            a_shape = tuple(a_slice.get_shape())
+            b_shape = tuple(b_slice.get_shape())
+            if len(a_shape) != 2 or len(b_shape) != 2 or a_shape[0] != b_shape[1]:
                 raise RuntimeError(
-                    f"Unsupported LoRA pair shapes: {a_key}: {tuple(a.shape)}, "
-                    f"{b_key}: {tuple(b.shape)}"
+                    f"Unsupported LoRA pair shapes: {a_key}: {a_shape}, "
+                    f"{b_key}: {b_shape}"
                 )
-            ranks.append(int(a.shape[0]))
-            dtypes[str(a.dtype).replace('torch.', '')] += 1
-            del a, b
+            ranks.append(int(a_shape[0]))
+            dtypes[str(a_slice.get_dtype()).replace('torch.', '')] += 1
 
     if len(set(ranks)) != 1:
         raise RuntimeError(f"Mixed LoRA ranks are not supported by this SVD resizer: {sorted(set(ranks))}")
@@ -419,20 +474,23 @@ def svd_resize_krea2_lora(model_path, target_rank, alpha_mode="match_rank", dry_
         raise RuntimeError("CUDA was requested, but CUDA is not available in this Forge Python environment.")
 
     before_bytes = os.path.getsize(model_path)
-    # Single pass computing both the source payload and the target-rank estimate
-    # from tensor shapes (previously this was two separate full-data-read passes
-    # over every A/B pair, which is the main reason SVD resize was slow on large
-    # Krea2 LoRAs).
+    # Single pass computing both the source payload and the target-rank
+    # estimate, from header shape/dtype metadata only (get_slice(), not
+    # get_tensor()) -- this runs before dry-run and before the real SVD work
+    # even starts, so it shouldn't cost a full read of the source LoRA.
     estimated_tensor_bytes = 0
     source_tensor_bytes = 0
     with safetensors.safe_open(model_path, framework="pt", device="cpu") as f:
         for a_key, b_key in info["pairs"]:
-            a = f.get_tensor(a_key)
-            b = f.get_tensor(b_key)
-            dtype_bytes = a.element_size()
-            estimated_tensor_bytes += target_rank * (a.shape[1] + b.shape[0]) * dtype_bytes
-            source_tensor_bytes += a.nelement() * a.element_size() + b.nelement() * b.element_size()
-            del a, b
+            a_slice = f.get_slice(a_key)
+            b_slice = f.get_slice(b_key)
+            a_shape = tuple(a_slice.get_shape())
+            b_shape = tuple(b_slice.get_shape())
+            _, dtype_bytes = _slice_dtype_and_itemsize(a_slice)
+            a_numel = a_shape[0] * a_shape[1]
+            b_numel = b_shape[0] * b_shape[1]
+            estimated_tensor_bytes += target_rank * (a_shape[1] + b_shape[0]) * dtype_bytes
+            source_tensor_bytes += a_numel * dtype_bytes + b_numel * dtype_bytes
 
     original_alpha = info["alpha"]
     if alpha_mode == "match_rank":
