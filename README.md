@@ -1,6 +1,6 @@
 # Forge Neo Krea2 LoRA Tools + SVD Resizer
 
-A standalone [Forge Neo](https://github.com/lllyasviel/stable-diffusion-webui-forge) extension for inspecting, structurally stripping, and SVD-rank-resizing **Krea2** LoRAs directly from the WebUI.
+A standalone [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic) extension for inspecting, structurally stripping, and SVD-rank-resizing **Krea2** LoRAs directly from the WebUI.
 
 It adds a new **Krea2 LoRA Tools** tab to the WebUI, with two modes:
 
@@ -19,6 +19,7 @@ Structural analysis reads only tensor *shape/dtype metadata* from the safetensor
 - Dry-run mode shows the estimated size reduction before you commit to writing a file.
 
 ### Structural Stripper
+Forked from [Krea2_LoRA_Stripper](https://github.com/Winnougan/Krea2_LoRA_Stripper)
 - Four built-in profiles:
   - **Max (txtfusion only)** — strips all diffusion-block LoRA weights, keeps only text-fusion tensors.
   - **Balanced (keep 50% diffusion blocks)**
