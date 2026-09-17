@@ -242,86 +242,113 @@ def _svd(name, rank, alpha_mode, dry, device, progress=gr.Progress(track_tqdm=Fa
         return '\n'.join(logs + [f'ERROR: {e}'])
 
 
+def _lora_selector(label, choices):
+    with gr.Row():
+        lora_name = gr.Dropdown(
+            label=label,
+            choices=choices,
+            value=choices[0] if choices else None,
+            scale=8,
+        )
+        refresh_loras = gr.Button('🔄 Refresh', scale=1)
+    return lora_name, refresh_loras
+
+
 def _lora_tab_ui():
     _refresh()
     choices = list(_LORA_CHOICES)
 
     with gr.Blocks() as ui:
-        gr.Markdown('## 🐈‍⬛ Krea2 LoRA Tools')
+        gr.Markdown('## Krea2 LoRA Tools')
         gr.Markdown(
-            'Analyze, structurally strip, or SVD-resize Krea2 LoRAs. '
+            'Analyze, SVD-resize, or structurally strip Krea2 LoRAs. '
             'SVD keeps the strongest low-rank components and writes a new file; the source is never modified. '
             'Supports both `diffusion_model.*` and `transformer.*` Krea2 key layouts.'
         )
 
-        with gr.Row():
-            lora_name = gr.Dropdown(
-                label='Krea2 LoRA', choices=choices,
-                value=choices[0] if choices else None, scale=8,
-            )
-            refresh_loras = gr.Button('🔄 Refresh', scale=1)
+        with gr.Tabs(elem_id="forge_neo_krea2_lora_modes"):
+            with gr.Tab("SVD Resize", id="svd", elem_id="forge_neo_krea2_lora_svd_mode"):
+                svd_lora_name, svd_refresh_loras = _lora_selector('Krea2 LoRA', choices)
 
-        gr.Markdown('### 🔬 SVD Resizer')
-        with gr.Row():
-            svd_device = gr.Dropdown(
-                label='Compute device',
-                choices=[('Auto (CUDA if available)', 'auto'), ('CUDA', 'cuda'), ('CPU', 'cpu')],
-                value='auto', scale=2,
-            )
-            svd_rank = gr.Slider(
-                minimum=1, maximum=32, value=17, step=1,
-                label='SVD target rank', scale=2,
-            )
-            svd_alpha = gr.Dropdown(
-                label='Alpha handling',
-                choices=[
-                    ('Match new rank (recommended)', 'match_rank'),
-                    ('Preserve original alpha', 'preserve_alpha'),
-                ],
-                value='match_rank', scale=3,
-            )
-            svd_dry = gr.Checkbox(label='SVD dry run', value=False, scale=1)
+                with gr.Row():
+                    svd_device = gr.Dropdown(
+                        label='Compute device',
+                        choices=[('Auto (CUDA if available)', 'auto'), ('CUDA', 'cuda'), ('CPU', 'cpu')],
+                        value='auto', scale=2,
+                    )
+                    svd_rank = gr.Slider(
+                        minimum=1, maximum=32, value=17, step=1,
+                        label='SVD target rank', scale=2,
+                    )
+                    svd_alpha = gr.Dropdown(
+                        label='Alpha handling',
+                        choices=[
+                            ('Match new rank (recommended)', 'match_rank'),
+                            ('Preserve original alpha', 'preserve_alpha'),
+                        ],
+                        value='match_rank', scale=3,
+                    )
+                    svd_dry = gr.Checkbox(label='SVD dry run', value=False, scale=1)
 
-        with gr.Row():
-            svd_inspect_button = gr.Button('🔎 Analyze & recommend rank')
-            svd_button = gr.Button('🔬 SVD Resize LoRA')
+                with gr.Row():
+                    svd_inspect_button = gr.Button('Analyze & recommend rank')
+                    svd_button = gr.Button('SVD Resize LoRA', variant='primary')
 
-        svd_output = gr.Textbox(label='SVD analysis / log / result', value='Ready.', lines=20, interactive=False)
+                svd_output = gr.Textbox(
+                    label='SVD analysis / log / result',
+                    value='Ready.', lines=20, interactive=False,
+                )
 
-        gr.Markdown('### 🧰 Legacy structural stripper')
-        gr.Markdown('Structural profiles are kept as a separate legacy method. For fidelity-preserving size reduction, prefer SVD.')
-        with gr.Row():
-            lora_profile = gr.Dropdown(
-                label='Profile', choices=list(KREA2_LORA_PROFILES.keys()),
-                value='Max (txtfusion only)', scale=2,
-            )
-            lora_risk_threshold = gr.Slider(
-                minimum=0, maximum=100, value=10, step=0.5,
-                label='Risk threshold (%)', scale=1,
-            )
-            lora_dry_run = gr.Checkbox(label='Dry run', value=False, scale=1)
-        with gr.Row():
-            lora_analyze_button = gr.Button('Analyze Krea2 LoRA')
-            lora_strip_button = gr.Button('Strip Krea2 LoRA')
-        lora_log_output = gr.Textbox(label='Stripper log / result', value='Ready.', lines=16, interactive=False)
+                svd_refresh_loras.click(fn=_refresh, outputs=[svd_lora_name])
+                svd_inspect_button.click(
+                    fn=_inspect_svd,
+                    inputs=[svd_lora_name, svd_device],
+                    outputs=[svd_output, svd_rank],
+                )
+                svd_button.click(
+                    fn=_svd,
+                    inputs=[svd_lora_name, svd_rank, svd_alpha, svd_dry, svd_device],
+                    outputs=[svd_output],
+                )
 
-        refresh_loras.click(fn=_refresh, outputs=[lora_name])
-        svd_inspect_button.click(
-            fn=_inspect_svd,
-            inputs=[lora_name, svd_device],
-            outputs=[svd_output, svd_rank],
-        )
-        svd_button.click(
-            fn=_svd,
-            inputs=[lora_name, svd_rank, svd_alpha, svd_dry, svd_device],
-            outputs=[svd_output],
-        )
-        lora_analyze_button.click(fn=_analyze, inputs=[lora_name], outputs=[lora_log_output])
-        lora_strip_button.click(
-            fn=_strip,
-            inputs=[lora_name, lora_risk_threshold, lora_dry_run, lora_profile],
-            outputs=[lora_log_output],
-        )
+            with gr.Tab("Structural Stripper", id="stripper", elem_id="forge_neo_krea2_lora_stripper_mode"):
+                strip_lora_name, strip_refresh_loras = _lora_selector('Krea2 LoRA', choices)
+
+                gr.Markdown(
+                    'Legacy structural reduction: removes selected LORA blocks according to a profile. '
+                    'For fidelity-preserving rank reduction, use the SVD Resize tab.'
+                )
+
+                with gr.Row():
+                    lora_profile = gr.Dropdown(
+                        label='Profile', choices=list(KREA2_LORA_PROFILES.keys()),
+                        value='Max (txtfusion only)', scale=2,
+                    )
+                    lora_risk_threshold = gr.Slider(
+                        minimum=0, maximum=100, value=10, step=0.5,
+                        label='Risk threshold (%)', scale=1,
+                    )
+                    lora_dry_run = gr.Checkbox(label='Dry run', value=False, scale=1)
+
+                with gr.Row():
+                    lora_analyze_button = gr.Button('Analyze LoRA')
+                    lora_strip_button = gr.Button('Strip LoRA', variant='primary')
+
+                lora_log_output = gr.Textbox(
+                    label='Stripper log / result', value='Ready.', lines=20, interactive=False,
+                )
+
+                strip_refresh_loras.click(fn=_refresh, outputs=[strip_lora_name])
+                lora_analyze_button.click(
+                    fn=_analyze,
+                    inputs=[strip_lora_name],
+                    outputs=[lora_log_output],
+                )
+                lora_strip_button.click(
+                    fn=_strip,
+                    inputs=[strip_lora_name, lora_risk_threshold, lora_dry_run, lora_profile],
+                    outputs=[lora_log_output],
+                )
 
     return [(ui, 'Krea2 LoRA Tools', 'krea2_lora_tools')]
 
