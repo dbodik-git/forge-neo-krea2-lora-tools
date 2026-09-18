@@ -36,8 +36,7 @@ Our Structural Stripper is an expanded Forge Neo implementation inspired by
 that approach, with additional profiles, dry-run analysis, risk thresholds,
 and Forge Neo UI integration.
 
-Original source:
-https://civitai.red/models/2742336/nsfw-krea2-low-vram?modelVersionId=3089248
+Original source: [Puppet_Master on Civitai Red](https://civitai.red/models/2742336/nsfw-krea2-low-vram?modelVersionId=3089248)
 
 - Four built-in profiles:
   - **Max (txtfusion only)** — strips all diffusion-block LoRA weights, keeps only text-fusion tensors.
