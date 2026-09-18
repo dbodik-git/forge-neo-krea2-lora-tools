@@ -12,6 +12,11 @@ Structural analysis reads only tensor *shape/dtype metadata* from the safetensor
 ## Features
 
 ### SVD Resize
+
+The SVD rank-resizing implementation in this extension is a separate approach
+from the structural stripping method above. It performs per-layer SVD
+compression of LoRA A/B pairs and does not remove diffusion blocks by profile.
+
 - Detects `lora_A` / `lora_B` pairs and validates that the file uses a supported Krea2 key layout (`diffusion_model.blocks.*`, `diffusion_model.txtfusion.*`, `transformer.transformer_blocks.*`, `transformer.text_fusion.*`).
 - **Analyze & recommend rank**: computes the retained-energy curve for each A/B pair using a QR + small-SVD approach, then suggests a target rank for Aggressive (95%), Balanced (98%), and Conservative (99%) quality targets — without writing any file.
 - **SVD Resize LoRA**: truncates every pair to the chosen target rank and saves a new `..._SVD_r<rank>.safetensors` file.
@@ -19,7 +24,21 @@ Structural analysis reads only tensor *shape/dtype metadata* from the safetensor
 - Dry-run mode shows the estimated size reduction before you commit to writing a file.
 
 ### Structural Stripper
-Forked from [Krea2_LoRA_Stripper](https://github.com/Winnougan/Krea2_LoRA_Stripper)
+
+The original Krea2 LoRA stripping approach was developed by **Winnougan**
+in [Krea2_LoRA_Stripper](https://github.com/Winnougan/Krea2_LoRA_Stripper).
+
+That project credits [**Puppet_Master**](https://civitai.red/user/Puppet_Master) on Civitai Red as the original source
+of the technique/code for reducing Krea 2 LoRA file sizes by removing
+diffusion/DIT weights while retaining the text-fusion layers.
+
+Our Structural Stripper is an expanded Forge Neo implementation inspired by
+that approach, with additional profiles, dry-run analysis, risk thresholds,
+and Forge Neo UI integration.
+
+Original source:
+https://civitai.red/models/2742336/nsfw-krea2-low-vram?modelVersionId=3089248
+
 - Four built-in profiles:
   - **Max (txtfusion only)** — strips all diffusion-block LoRA weights, keeps only text-fusion tensors.
   - **Balanced (keep 50% diffusion blocks)**
